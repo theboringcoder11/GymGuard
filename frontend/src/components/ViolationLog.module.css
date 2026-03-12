@@ -1,0 +1,91 @@
+.container {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  flex: 1;
+}
+
+.header {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.title {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 2px;
+}
+
+.badge {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--red);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.columnHeaders {
+  display: grid;
+  grid-template-columns: 60px 80px 60px 1fr;
+  gap: 12px;
+  padding: 7px 14px;
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 1.5px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 60px 80px 60px 1fr;
+  gap: 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border-dim);
+  font-size: 11px;
+  align-items: center;
+  animation: fadeIn 0.3s ease;
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.id {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.time {
+  color: #94a3b8;
+}
+
+.countBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--red);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.detail {
+  color: var(--red);
+  font-size: 10px;
+  font-weight: 600;
+}

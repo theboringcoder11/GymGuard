@@ -208,7 +208,7 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40)
         # Encode frame as JPEG → base64 for WebSocket streaming
         # Only send every 3rd frame to keep WS traffic reasonable
         frame_b64 = None
-        if frame_idx % 3 == 0:
+        if frame_idx % 1 == 0:
             _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_b64 = base64.b64encode(buf).decode("utf-8")
 
