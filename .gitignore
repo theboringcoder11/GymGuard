@@ -1,0 +1,58 @@
+
+Copy
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+ 
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ 
+# ── YOLOv8 / ML ───────────────────────────────────────────────────────────────
+# Model weights (large binary files — download on first run)
+*.pt
+*.onnx
+*.engine
+*.tflite
+ 
+# ── Output files ──────────────────────────────────────────────────────────────
+annotated_output.mp4
+violations.csv
+runs/
+ 
+# ── Environment variables ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+ 
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+ 
+# ── Video files (stock footage — don't commit) ────────────────────────────────
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+ 
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ 
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
