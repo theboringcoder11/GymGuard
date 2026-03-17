@@ -26,19 +26,10 @@ import supervision as sv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from database import (
-    init_db, create_session, close_session,
-    save_entry, save_violation
-)
 
 # ── App Setup ─────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="GymGuard API")
-
-@app.on_event("startup")
-def startup():
-    """Initialize database tables on server start."""
-    init_db()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,7 +51,6 @@ state = {
     "video_path":       None,
     "status":           "idle",  # idle | processing | done | error
     "error":            None,
-    "session_id":       None,
 }
 connected_clients: list[WebSocket] = []
 state_lock = threading.Lock()
@@ -127,16 +117,12 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
     entry_window = {}
     swipe_simulated_at = int(total_frames * 0.05)  # simulated member swipe event
 
-    # Create a new session in the database
-    session_id = create_session(video_path, line_ratio)
-
     with state_lock:
         state["running"]      = True
         state["status"]       = "processing"
         state["total_frames"] = total_frames
         state["fps"]          = fps
         state["video_path"]   = video_path
-        state["session_id"]   = session_id
 
     t_start = time.time()
 
@@ -162,19 +148,9 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
 
         # ── Record inward crossings only ──────────────────────────────────────
         if detections.tracker_id is not None:
-            for did_enter, tracker_id, conf_val in zip(
-                crossed_in, detections.tracker_id, detections.confidence
-            ):
+            for did_enter, tracker_id in zip(crossed_in, detections.tracker_id):
                 if did_enter:
                     entry_window[tracker_id] = frame_idx
-                    # Persist entry to database
-                    save_entry(
-                        session_id = session_id,
-                        tracker_id = int(tracker_id),
-                        frame      = frame_idx,
-                        timestamp  = round(frame_idx / fps, 2),
-                        confidence = float(conf_val),
-                    )
 
         # ── Violation check ───────────────────────────────────────────────────
         # How many unique IDs entered within the last 3 seconds?
@@ -201,13 +177,6 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
                 "confidence": float(np.mean(detections.confidence)) if len(detections) else 0,
             }
             violations.append(violation)
-            # Persist violation to database
-            save_violation(
-                session_id = session_id,
-                frame      = frame_idx,
-                timestamp  = round(frame_idx / fps, 2),
-                people     = len(recent_entrants),
-            )
 
         # ── Annotate frame ────────────────────────────────────────────────────
         annotated = frame.copy()
@@ -276,16 +245,12 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
     cap.release()
     writer.release()
 
-    # Close the session in the database
-    close_session(session_id, total_frames, fps, status="done")
-
     with state_lock:
         state["running"]     = False
         state["status"]      = "done"
         state["output_path"] = out_path
 
     print(f"\n✅ Done. Annotated video saved to: {out_path}")
-    print(f"   Session ID:          {session_id}")
     print(f"   Total entries (in):  {line_zone.in_count}")
     print(f"   Total exits  (out):  {line_zone.out_count}")
     print(f"   Violations detected: {len(violations)}")
@@ -311,7 +276,6 @@ async def websocket_endpoint(ws: WebSocket):
                     "violations":      state["violations"],
                     "frame_b64":       state["latest_frame_b64"],
                     "error":           state["error"],
-                    "session_id":      state["session_id"],
                 }
             await ws.send_text(json.dumps(payload))
             await asyncio.sleep(0.1)
@@ -325,26 +289,6 @@ async def websocket_endpoint(ws: WebSocket):
 def get_status():
     with state_lock:
         return {k: v for k, v in state.items() if k != "latest_frame_b64"}
-
-
-@app.post("/reset")
-def reset():
-    """Clears all state so a new video can be started without restarting the server."""
-    if state["running"]:
-        return {"error": "Detection still running — wait for it to finish first"}
-    with state_lock:
-        state["frame_count"]      = 0
-        state["total_frames"]     = 0
-        state["fps"]              = 0
-        state["people_in_frame"]  = 0
-        state["total_entries"]    = 0
-        state["violations"]       = []
-        state["latest_frame_b64"] = None
-        state["video_path"]       = None
-        state["status"]           = "idle"
-        state["error"]            = None
-        state["session_id"]       = None
-    return {"message": "State reset — ready for a new video"}
 
 
 @app.post("/start")
@@ -367,66 +311,27 @@ def start_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.4
     return {"message": "Detection started", "video": video_path}
 
 
-# ── History endpoints ────────────────────────────────────────────────────────
-
-@app.get("/history/sessions")
-def list_sessions():
-    from database import get_all_sessions
-    return get_all_sessions()
-
-
-@app.get("/history/sessions/{session_id}")
-def get_session_detail(session_id: str):
-    from database import get_session, get_entries, get_violations
-    session    = get_session(session_id)
-    if not session:
-        return {"error": "Session not found"}
-    entries    = get_entries(session_id)
-    violations = get_violations(session_id)
-    return {
-        "session":    session,
-        "entries":    entries,
-        "violations": violations,
-    }
-
-
-@app.get("/history/violations")
-def list_all_violations():
-    from database import get_all_violations
-    return get_all_violations()
-
-
 # ── CLI entrypoint ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GymGuard Tailgate Detector")
-    parser.add_argument("--video",     required=False, default=None, help="Path to input video file (optional — can also POST to /start)")
-    parser.add_argument("--line",      type=float, default=0.65,     help="Counting line position (0.0-1.0)")
-    parser.add_argument("--conf",      type=float, default=0.40,     help="Detection confidence threshold")
-    parser.add_argument("--flip-line", action="store_true",          help="Flip in/out direction (use if entries show as 'out')")
-    parser.add_argument("--no-server", action="store_true",          help="Run detection only, no web server (requires --video)")
+    parser.add_argument("--video",     required=True,            help="Path to input video file")
+    parser.add_argument("--line",      type=float, default=0.65, help="Counting line position (0.0-1.0)")
+    parser.add_argument("--conf",      type=float, default=0.40, help="Detection confidence threshold")
+    parser.add_argument("--flip-line", action="store_true",      help="Flip in/out direction (use if entries show as 'out')")
+    parser.add_argument("--no-server", action="store_true",      help="Run detection only, no web server")
     args = parser.parse_args()
 
     if args.no_server:
-        if not args.video:
-            print("Error: --video is required when using --no-server")
-            exit(1)
         run_detection(args.video, args.line, args.conf, args.flip_line)
     else:
-        # If a video was passed at launch, start detection immediately
-        if args.video:
-            t = threading.Thread(
-                target=run_detection,
-                args=(args.video, args.line, args.conf, args.flip_line),
-                daemon=True
-            )
-            t.start()
-            print(f"🎥 Processing: {args.video}")
-        else:
-            # Start server in idle state — use /start to kick off detection
-            print(f"⏳ Server started in idle mode")
-            print(f"   POST to /start?video_path=... to begin detection")
-
+        t = threading.Thread(
+            target=run_detection,
+            args=(args.video, args.line, args.conf, args.flip_line),
+            daemon=True
+        )
+        t.start()
+        print(f"🎥 Processing: {args.video}")
         print(f"🌐 Dashboard API: http://localhost:8000")
         print(f"📡 WebSocket:     ws://localhost:8000/ws")
         uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
