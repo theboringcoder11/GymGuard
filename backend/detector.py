@@ -5,10 +5,10 @@ Processes a video file with YOLOv8, counts people crossing an entry line,
 and streams real-time results to the React dashboard via WebSocket.
 
 Run with:
-    python detector.py --video path/to/your/video.mp4
+    python detect.py --video path/to/your/video.mp4
 
     # If "in" and "out" are backwards for your camera angle:
-    python detector.py --video path/to/your/video.mp4 --flip-line
+    python detect.py --video path/to/your/video.mp4 --flip-line
 """
 
 import argparse
@@ -61,6 +61,7 @@ state = {
     "status":           "idle",  # idle | processing | done | error
     "error":            None,
     "session_id":       None,
+    "swipe_queue":      [],     # list of active swipe windows [{member_id, expires_at}]
 }
 connected_clients: list[WebSocket] = []
 state_lock = threading.Lock()
@@ -124,11 +125,13 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
     frame_idx    = 0
     # entry_window maps tracker_id -> frame number of their inward crossing.
     # Only populated on crossed_in events — exits are ignored entirely.
-    entry_window = {}
-    swipe_simulated_at = int(total_frames * 0.05)  # simulated member swipe event
+    entry_window              = {}     # tracker_id -> frame of inward crossing
+    SWIPE_WINDOW_SECONDS      = 5      # how long after a swipe to watch for tailgating
+    violation_fired_this_swipe = False  # ensures one violation per swipe window
 
     # Create a new session in the database
     session_id = create_session(video_path, line_ratio)
+    print(session_id)
 
     with state_lock:
         state["running"]      = True
@@ -166,7 +169,7 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
                 crossed_in, detections.tracker_id, detections.confidence
             ):
                 if did_enter:
-                    entry_window[tracker_id] = frame_idx
+                    entry_window[tracker_id] = frame_idx  # frame-based
                     # Persist entry to database
                     save_entry(
                         session_id = session_id,
@@ -177,27 +180,65 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
                     )
 
         # ── Violation check ───────────────────────────────────────────────────
-        # How many unique IDs entered within the last 3 seconds?
-        # If 2+ entered in that window after a swipe event, it's a tailgate.
-        window_frames = int(fps * 3)
-        recent_entrants = {
-            tid for tid, f in entry_window.items()
-            if frame_idx - f <= window_frames
-        }
+        # Prune expired swipe windows from the queue, then compare:
+        #   people who crossed the line > number of active swipes = tailgate
+        #
+        # Example:
+        #   2 swipes in queue + 2 people crossed = fine (each has a valid swipe)
+        #   1 swipe in queue + 2 people crossed  = violation
+        #   0 swipes in queue + 2 people crossed = no violation (no swipe event)
+        with state_lock:
+            # Remove swipe windows that have expired (frame-based)
+            before = len(state["swipe_queue"])
+            state["swipe_queue"] = [
+                s for s in state["swipe_queue"]
+                if frame_idx <= s["expire_frame"]
+            ]
+            expired_count = before - len(state["swipe_queue"])
+            active_swipes = list(state["swipe_queue"])
 
+        # If all windows expired, clear entry_window and reset violation flag
+        if expired_count > 0 and not active_swipes:
+            entry_window.clear()
+            violation_fired_this_swipe = False
+
+        # recent_entrants = everyone in entry_window when a swipe is active.
+        # entry_window is cleared when the swipe window expires, so it only
+        # ever contains people who crossed since the last reset — no stale data.
+        if active_swipes:
+            recent_entrants = set(entry_window.keys())
+        else:
+            recent_entrants = set()
+
+        # Violation = more people entered than there are valid swipes
         is_violation = (
-            len(recent_entrants) >= 2
-            and frame_idx > swipe_simulated_at
+            len(active_swipes) > 0
+            and len(recent_entrants) > len(active_swipes)
         )
 
-        # Debounce: don't log the same event repeatedly — require 2s gap
-        if is_violation and (not violations or frame_idx - violations[-1]["frame"] > fps * 2):
+        # Who to blame — the earliest swipe in the queue
+        swipe_member_id = active_swipes[0]["member_id"] if active_swipes else "UNKNOWN"
+
+        # Debug log — prints every frame a swipe window is active
+        if active_swipes:
+            print(
+                f"[SWIPE ACTIVE] frame={frame_idx} "
+                f"swipes={len(active_swipes)} "
+                f"entrants={len(recent_entrants)} "
+                f"entry_window={dict(entry_window)} "
+                f"violation={is_violation}"
+            )
+
+        # One violation per swipe window — once fired, clear the entry_window
+        # and swipe queue so the same event can't fire twice.
+        if is_violation and not violation_fired_this_swipe:
+            violation_fired_this_swipe = True
             violation = {
                 "id":         len(violations) + 1,
                 "frame":      frame_idx,
                 "timestamp":  round(frame_idx / fps, 2),
                 "people":     len(recent_entrants),
-                "member_id":  "M-SIM",  # replace with real access control lookup
+                "member_id":  swipe_member_id or "UNKNOWN",
                 "confidence": float(np.mean(detections.confidence)) if len(detections) else 0,
             }
             violations.append(violation)
@@ -208,6 +249,16 @@ def run_detection(video_path: str, line_ratio: float = 0.65, conf: float = 0.40,
                 timestamp  = round(frame_idx / fps, 2),
                 people     = len(recent_entrants),
             )
+            # Remove only the earliest (offending) swipe from the queue.
+            # Other concurrent legitimate swipes stay active.
+            entry_window.clear()
+            violation_fired_this_swipe = False
+            with state_lock:
+                if state["swipe_queue"]:
+                    # Pop the earliest swipe — that's the one being violated against
+                    state["swipe_queue"] = sorted(
+                        state["swipe_queue"], key=lambda s: s["queued_frame"]
+                    )[1:]  # remove the first, keep the rest
 
         # ── Annotate frame ────────────────────────────────────────────────────
         annotated = frame.copy()
@@ -311,6 +362,8 @@ async def websocket_endpoint(ws: WebSocket):
                     "violations":      state["violations"],
                     "frame_b64":       state["latest_frame_b64"],
                     "error":           state["error"],
+                    "swipe_queue":     state["swipe_queue"],
+                    "swipe_count":     len(state["swipe_queue"]),
                     "session_id":      state["session_id"],
                 }
             await ws.send_text(json.dumps(payload))
@@ -344,7 +397,58 @@ def reset():
         state["status"]           = "idle"
         state["error"]            = None
         state["session_id"]       = None
+        state["swipe_queue"]      = []
     return {"message": "State reset — ready for a new video"}
+
+
+@app.post("/swipe")
+def register_swipe(member_id: str = "M-SIM", window_seconds: float = 5.0):
+    """
+    Registers a member swipe event, adding a window to the queue.
+    Multiple swipes can be queued simultaneously — one per member.
+
+    Violation logic:
+        people who crossed > number of active swipes = tailgate
+
+    Usage:
+        # Single swipe
+        curl -X POST "http://localhost:8000/swipe?member_id=M-0042"
+
+        # Two members arriving close together (both legitimate)
+        curl -X POST "http://localhost:8000/swipe?member_id=M-0042"
+        curl -X POST "http://localhost:8000/swipe?member_id=M-0117"
+
+        # Custom window duration
+        curl -X POST "http://localhost:8000/swipe?member_id=M-0042&window_seconds=7"
+    """
+    if not state["running"]:
+        return {"error": "No detection running — start a video first"}
+
+    # Store the swipe with current frame + fps so the detection loop
+    # can calculate expiry in frames rather than wall clock time
+    with state_lock:
+        current_frame = state["frame_count"]
+        fps           = state["fps"] or 25
+        window_frames = int(fps * window_seconds)
+        swipe = {
+            "member_id":    member_id,
+            "queued_frame": current_frame,
+            "expire_frame": current_frame + window_frames,
+            "window_frames": window_frames,
+        }
+        state["swipe_queue"].append(swipe)
+        queue_depth = len(state["swipe_queue"])
+
+    print(f"[SWIPE] member={member_id} queued_frame={current_frame} expire_frame={current_frame + window_frames}")
+
+    return {
+        "message":        f"Swipe registered for {member_id}",
+        "member_id":      member_id,
+        "window_seconds": window_seconds,
+        "queued_frame":   current_frame,
+        "expire_frame":   current_frame + window_frames,
+        "queue_depth":    queue_depth,
+    }
 
 
 @app.post("/start")

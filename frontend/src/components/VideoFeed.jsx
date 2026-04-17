@@ -26,7 +26,7 @@ export default function VideoFeed({ frameB64, isViolation, peopleNow, connected,
           </p>
           {started && !connected && (
             <p className={styles.emptyError}>
-              Make sure backend is running: python detector.py --video your_video.mp4
+              Make sure backend is running: python detect.py --video your_video.mp4
             </p>
           )}
         </div>

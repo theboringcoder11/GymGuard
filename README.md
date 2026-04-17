@@ -6,7 +6,7 @@ and flags tailgate violations in a live React dashboard.
 ```
 gymguard/
 ├── backend/
-│   ├── detector.py        ← CV pipeline (YOLOv8 + ByteTrack + FastAPI + WebSocket)
+│   ├── detect.py        ← CV pipeline (YOLOv8 + ByteTrack + FastAPI + WebSocket)
 │   └── requirements.txt
 └── frontend/
     ├── src/App.js         ← React dashboard
@@ -24,7 +24,7 @@ cd backend
 pip install -r requirements.txt
 
 # Run on your stock video
-python detector.py --video /path/to/your/video.mp4
+python detect.py --video /path/to/your/video.mp4
 ```
 
 YOLOv8n weights (~6MB) download automatically on first run.
@@ -32,13 +32,13 @@ YOLOv8n weights (~6MB) download automatically on first run.
 **Optional flags:**
 ```bash
 # Adjust the counting line height (default 0.65 = 65% down the frame)
-python detector.py --video video.mp4 --line 0.55
+python detect.py --video video.mp4 --line 0.55
 
 # Adjust detection confidence (default 0.40)
-python detector.py --video video.mp4 --conf 0.35
+python detect.py --video video.mp4 --conf 0.35
 
 # Process video only, no web server (faster)
-python detector.py --video video.mp4 --no-server
+python detect.py --video video.mp4 --no-server
 ```
 
 The backend starts at **http://localhost:8000** and streams frames + events
